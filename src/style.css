@@ -48,14 +48,22 @@ body::before {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 3px solid rgb(215 167 60 / 45%);
   outline-offset: 2px;
+}
+
+.timeline-range {
+  height: 0.35rem;
+  accent-color: #ba5f45;
+  cursor: pointer;
 }
 
 .eyebrow {

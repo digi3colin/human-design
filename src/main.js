@@ -178,6 +178,10 @@ let foundPlaces = [];
 let highlightedPlace = -1;
 let searchTimer;
 let searchSequence = 0;
+let activeRange = null;
+let rangePlaybackTimer = null;
+
+const RANGE_MAX_SAMPLES = 240;
 
 dateInput.max = new Date().toISOString().slice(0, 10);
 
@@ -233,6 +237,8 @@ form.addEventListener("submit", (event) => {
   event.preventDefault();
   calculateChart();
 });
+
+document.addEventListener("keydown", handleRangeKeyboard);
 
 async function findPlaces(query) {
   const sequence = ++searchSequence;
@@ -330,7 +336,9 @@ function calculateChart() {
     setCalculating(true);
     window.setTimeout(() => {
       try {
-        const chart = calculateHumanDesign(date, decimalHour, utcOffset);
+        stopRangePlayback(false);
+        activeRange = null;
+        const chart = normalizeTerminology(calculateHumanDesign(date, decimalHour, utcOffset));
         renderChart(chart, {
           location: selectedPlace?.label || locationLabel,
           timezone: selectedPlace?.timezone || "Manual offset",
@@ -349,7 +357,7 @@ function calculateChart() {
   }
 }
 
-function renderChart(chart, context) {
+function renderChart(chart, context, options = {}) {
   const graph = renderBodygraphSVG(chart, {
     id: "result",
     gateNumbers: true,
@@ -389,7 +397,7 @@ function renderChart(chart, context) {
     : `<li class="py-3 text-sm text-ink/50">No complete channels — a Reflector chart.</li>`;
 
   chartResult.innerHTML = `
-    <div class="chart-enter">
+    <div class="${options.animate === false ? "" : "chart-enter"}">
       <div class="border-b border-ink/10 bg-white/28 px-6 py-7 sm:px-9 sm:py-8">
         <div class="flex flex-wrap items-start justify-between gap-5">
           <div>
@@ -462,6 +470,9 @@ function renderChart(chart, context) {
         </div>
       </section>
 
+      ${rangeExplorer(chart, context)}
+      ${rangeSnapshotPanel()}
+
       <div class="border-t border-ink/10 px-6 py-5 text-xs leading-5 text-ink/42 sm:px-9">
         ${escapeHTML(chart.meta.ephemeris)} · Design moment ${escapeHTML(chart.positions.design.dateTime)} · ${chart.meta.designSolarArc}° solar arc · ${escapeHTML(context.timezone)}
       </div>
@@ -470,10 +481,390 @@ function renderChart(chart, context) {
 
   emptyState.classList.add("hidden");
   chartResult.classList.remove("hidden");
+  wireRangeExplorer();
 
-  if (window.matchMedia("(max-width: 1023px)").matches) {
+  if (options.scroll !== false && window.matchMedia("(max-width: 1023px)").matches) {
     document.querySelector("#result-shell").scrollIntoView({ behavior: "smooth", block: "start" });
   }
+}
+
+function rangeExplorer(chart, context) {
+  const range = activeRange;
+  const startDate = range?.startDate || chart.meta.birthDate;
+  const startTime = range?.startTime || context.localTime;
+  const defaultEnd = addLocalMinutes(startDate, startTime, 24 * 60);
+  const endDate = range?.endDate || defaultEnd.date;
+  const endTime = range?.endTime || defaultEnd.time;
+  const stepMinutes = range?.stepMinutes || 60;
+
+  return `
+    <section id="range-section" class="border-y border-ink/10 bg-sage/[0.045] px-5 py-7 sm:px-9">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p class="eyebrow text-[0.62rem] font-bold text-sage">Time range explorer</p>
+          <h3 class="mt-2 font-serif text-2xl font-semibold">See when the chart changes</h3>
+          <p class="mt-2 max-w-2xl text-xs leading-5 text-ink/50">Samples a complete chart at each local time. This compares possible chart moments rather than adding transits to one natal chart. Change points are accurate to the selected interval, not the exact transition second.</p>
+        </div>
+      </div>
+
+      <form id="range-form" class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3" novalidate>
+        <label class="min-w-0">
+          <span class="field-label">Start date</span>
+          <input id="range-start-date" class="field-input" type="date" value="${escapeHTML(startDate)}" required />
+        </label>
+        <label class="min-w-0">
+          <span class="field-label">Start time</span>
+          <input id="range-start-time" class="field-input" type="time" value="${escapeHTML(startTime)}" required />
+        </label>
+        <label class="min-w-0">
+          <span class="field-label">End date</span>
+          <input id="range-end-date" class="field-input" type="date" value="${escapeHTML(endDate)}" required />
+        </label>
+        <label class="min-w-0">
+          <span class="field-label">End time</span>
+          <input id="range-end-time" class="field-input" type="time" value="${escapeHTML(endTime)}" required />
+        </label>
+        <label class="min-w-0">
+          <span class="field-label">Sample every</span>
+          <select id="range-step" class="field-input appearance-none" aria-label="Sample interval">
+            ${rangeStepOption(15, "15 minutes", stepMinutes)}
+            ${rangeStepOption(60, "1 hour", stepMinutes)}
+            ${rangeStepOption(360, "6 hours", stepMinutes)}
+            ${rangeStepOption(1440, "1 day", stepMinutes)}
+          </select>
+        </label>
+        <div class="sm:col-span-2 xl:col-span-3">
+          <p id="range-error" class="mb-3 hidden rounded-xl bg-clay/10 px-3 py-2 text-sm font-semibold text-clay" role="alert"></p>
+          <button id="range-calculate" class="rounded-xl bg-sage px-5 py-3 text-sm font-bold text-white transition hover:bg-ink disabled:cursor-wait disabled:opacity-60" type="submit">Calculate range</button>
+          <span class="ml-3 text-xs text-ink/42">Maximum ${RANGE_MAX_SAMPLES} samples</span>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function rangeSnapshotPanel() {
+  const range = activeRange;
+  if (!range) return "";
+
+  const selected = range.snapshots[range.selectedIndex];
+  const eventSnapshots = range.snapshots.filter((snapshot, index) => index === 0 || snapshot.changes.length > 0);
+  const changeItems = selected.changes.length
+    ? selected.changes
+        .map(
+          (change) => `
+            <li class="rounded-xl border border-ink/8 bg-white/55 px-3 py-2 text-xs leading-5">
+              <strong class="text-ink">${escapeHTML(change.label)}</strong>
+              <span class="ml-1 text-ink/45">${escapeHTML(change.from)} → ${escapeHTML(change.to)}</span>
+            </li>
+          `,
+        )
+        .join("")
+    : `<li class="rounded-xl bg-sage/8 px-3 py-2 text-xs leading-5 text-sage">${range.selectedIndex === 0 ? "Starting chart for this range." : "No gate, line, channel, or summary change since the previous sample."}</li>`;
+
+  return `
+    <section id="range-snapshot-panel" class="bg-sage/[0.045] px-5 py-7 sm:px-9">
+      <div class="rounded-2xl border border-ink/10 bg-[#fffdf8]/70 p-4 sm:p-5">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p class="eyebrow text-[0.56rem] font-bold text-sage">Selected snapshot</p>
+            <p class="mt-1 font-serif text-2xl font-semibold">${escapeHTML(formatMoment(selected.date, selected.time))}</p>
+          </div>
+          <span class="rounded-full bg-clay/10 px-3 py-1 text-xs font-bold text-clay">${range.snapshots.length} samples · ${eventSnapshots.length - 1} change points</span>
+        </div>
+
+        <div class="mt-5 flex items-center gap-3">
+          <button id="range-previous" class="grid size-9 shrink-0 place-items-center rounded-full border border-ink/12 bg-white text-ink transition hover:border-sage hover:text-sage disabled:opacity-30" type="button" ${range.selectedIndex === 0 ? "disabled" : ""} aria-label="Previous snapshot">←</button>
+          <button id="range-play" class="grid size-9 shrink-0 place-items-center rounded-full bg-ink text-xs text-paper transition hover:bg-sage" type="button" aria-label="${range.isPlaying ? "Pause timeline" : "Play timeline"}">${range.isPlaying ? "❚❚" : "▶"}</button>
+          <input id="range-slider" class="timeline-range w-full" type="range" min="0" max="${range.snapshots.length - 1}" value="${range.selectedIndex}" step="1" aria-label="Select chart snapshot" />
+          <button id="range-next" class="grid size-9 shrink-0 place-items-center rounded-full border border-ink/12 bg-white text-ink transition hover:border-sage hover:text-sage disabled:opacity-30" type="button" ${range.selectedIndex === range.snapshots.length - 1 ? "disabled" : ""} aria-label="Next snapshot">→</button>
+        </div>
+        <div class="mt-2 flex justify-between text-[0.62rem] text-ink/40">
+          <span>${escapeHTML(formatMoment(range.startDate, range.startTime))}</span>
+          <span>${escapeHTML(formatMoment(range.endDate, range.endTime))}</span>
+        </div>
+        <p class="mt-3 text-center text-[0.65rem] font-semibold text-ink/42">← → step through time · Space play/pause · 1 second per frame</p>
+
+        <div class="mt-5 overflow-x-auto pb-2">
+          <div class="flex min-w-max items-center gap-2" aria-label="Detected change points">
+            ${eventSnapshots
+              .map((snapshot) => {
+                const index = range.snapshots.indexOf(snapshot);
+                return `<button class="range-event rounded-full border px-3 py-1.5 text-xs font-semibold transition ${index === range.selectedIndex ? "border-ink bg-ink text-paper" : "border-ink/10 bg-white/60 text-ink/55 hover:border-sage hover:text-sage"}" type="button" data-range-index="${index}">${index === 0 ? "Start" : escapeHTML(shortMoment(snapshot.date, snapshot.time))}</button>`;
+              })
+              .join("")}
+          </div>
+        </div>
+
+        <div class="mt-4 border-t border-ink/8 pt-4">
+          <p class="text-xs font-bold uppercase tracking-wider text-ink/45">Changes at this sample</p>
+          <ul class="mt-3 grid gap-2 sm:grid-cols-2">${changeItems}</ul>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function rangeStepOption(value, label, selected) {
+  return `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
+}
+
+function wireRangeExplorer() {
+  document.querySelector("#range-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    calculateRange();
+  });
+
+  document.querySelector("#range-slider")?.addEventListener("change", (event) => {
+    showRangeSnapshot(Number(event.target.value));
+  });
+
+  document.querySelector("#range-previous")?.addEventListener("click", () => {
+    showRangeSnapshot(activeRange.selectedIndex - 1);
+  });
+
+  document.querySelector("#range-next")?.addEventListener("click", () => {
+    showRangeSnapshot(activeRange.selectedIndex + 1);
+  });
+
+  document.querySelector("#range-play")?.addEventListener("click", toggleRangePlayback);
+
+  document.querySelectorAll("[data-range-index]").forEach((button) => {
+    button.addEventListener("click", () => showRangeSnapshot(Number(button.dataset.rangeIndex)));
+  });
+}
+
+async function calculateRange() {
+  stopRangePlayback(false);
+  const startDate = document.querySelector("#range-start-date").value;
+  const startTime = document.querySelector("#range-start-time").value;
+  const endDate = document.querySelector("#range-end-date").value;
+  const endTime = document.querySelector("#range-end-time").value;
+  const stepMinutes = Number(document.querySelector("#range-step").value);
+  const rangeError = document.querySelector("#range-error");
+  const rangeButton = document.querySelector("#range-calculate");
+  const startMs = localMomentToMs(startDate, startTime);
+  const endMs = localMomentToMs(endDate, endTime);
+
+  rangeError.classList.add("hidden");
+  rangeError.textContent = "";
+
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    showRangeError("The end must be later than the start.");
+    return;
+  }
+
+  const moments = [];
+  const stepMs = stepMinutes * 60 * 1000;
+  for (let moment = startMs; moment <= endMs; moment += stepMs) moments.push(moment);
+  if (moments.at(-1) !== endMs) moments.push(endMs);
+
+  if (moments.length > RANGE_MAX_SAMPLES) {
+    showRangeError(`This range needs ${moments.length} samples. Choose a larger interval or a shorter range.`);
+    return;
+  }
+
+  const hasOffsetOverride = offsetInput.value !== "";
+  if (!selectedPlace && !hasOffsetOverride) {
+    showRangeError("Choose a location or provide a manual UTC offset first.");
+    return;
+  }
+
+  rangeButton.disabled = true;
+  const snapshots = [];
+
+  try {
+    for (let index = 0; index < moments.length; index += 1) {
+      const { date, time } = msToLocalMoment(moments[index]);
+      const utcOffset = hasOffsetOverride
+        ? Number(offsetInput.value)
+        : resolveUtcOffset(date, time, selectedPlace.timezone);
+      const chart = normalizeTerminology(calculateHumanDesign(date, timeToDecimal(time), utcOffset));
+      const previous = snapshots.at(-1)?.chart;
+
+      snapshots.push({
+        chart,
+        date,
+        time,
+        changes: previous ? compareCharts(previous, chart) : [],
+        context: {
+          location: selectedPlace?.label || locationInput.value.trim(),
+          timezone: selectedPlace?.timezone || "Manual offset",
+          utcOffset,
+          localTime: time,
+        },
+      });
+
+      rangeButton.textContent = `Calculating ${index + 1} / ${moments.length}…`;
+      if (index > 0 && index % 16 === 0) await nextFrame();
+    }
+
+    activeRange = { startDate, startTime, endDate, endTime, stepMinutes, snapshots, selectedIndex: 0, isPlaying: false };
+    renderChart(snapshots[0].chart, snapshots[0].context, { scroll: false });
+  } catch (error) {
+    console.error(error);
+    showRangeError("The range could not be calculated. Check the dates, time zone, and interval.");
+    rangeButton.disabled = false;
+    rangeButton.textContent = "Calculate range";
+  }
+}
+
+function showRangeSnapshot(index, options = {}) {
+  if (!activeRange) return;
+  if (options.stopPlayback !== false) stopRangePlayback(false);
+  activeRange.selectedIndex = Math.max(0, Math.min(activeRange.snapshots.length - 1, index));
+  const snapshot = activeRange.snapshots[activeRange.selectedIndex];
+  renderChart(snapshot.chart, snapshot.context, { scroll: false, animate: false });
+}
+
+function handleRangeKeyboard(event) {
+  if (!activeRange || isTextEntryTarget(event.target)) return;
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    showRangeSnapshot(activeRange.selectedIndex - 1);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    showRangeSnapshot(activeRange.selectedIndex + 1);
+  } else if (event.code === "Space" && !event.repeat) {
+    if (["button", "a", "summary"].includes(event.target?.tagName?.toLowerCase())) return;
+    event.preventDefault();
+    toggleRangePlayback();
+  }
+}
+
+function isTextEntryTarget(target) {
+  const tagName = target?.tagName?.toLowerCase();
+  return target?.isContentEditable || ["input", "select", "textarea"].includes(tagName);
+}
+
+function toggleRangePlayback() {
+  if (!activeRange) return;
+
+  if (activeRange.isPlaying) {
+    stopRangePlayback(true);
+    return;
+  }
+
+  if (activeRange.selectedIndex >= activeRange.snapshots.length - 1) {
+    activeRange.selectedIndex = 0;
+  }
+
+  activeRange.isPlaying = true;
+  const snapshot = activeRange.snapshots[activeRange.selectedIndex];
+  renderChart(snapshot.chart, snapshot.context, { scroll: false, animate: false });
+  scheduleRangePlayback();
+}
+
+function scheduleRangePlayback() {
+  window.clearTimeout(rangePlaybackTimer);
+  rangePlaybackTimer = window.setTimeout(() => {
+    rangePlaybackTimer = null;
+    if (!activeRange?.isPlaying) return;
+
+    if (activeRange.selectedIndex >= activeRange.snapshots.length - 1) {
+      stopRangePlayback(true);
+      return;
+    }
+
+    showRangeSnapshot(activeRange.selectedIndex + 1, { stopPlayback: false });
+    scheduleRangePlayback();
+  }, 1000);
+}
+
+function stopRangePlayback(render = true) {
+  window.clearTimeout(rangePlaybackTimer);
+  rangePlaybackTimer = null;
+
+  if (!activeRange) return;
+  const wasPlaying = activeRange.isPlaying;
+  activeRange.isPlaying = false;
+
+  if (render && wasPlaying) {
+    const snapshot = activeRange.snapshots[activeRange.selectedIndex];
+    renderChart(snapshot.chart, snapshot.context, { scroll: false, animate: false });
+  }
+}
+
+function compareCharts(previous, current) {
+  const changes = [];
+  const summaryFields = [
+    ["Type", previous.type.name, current.type.name],
+    ["Authority", previous.authority.name, current.authority.name],
+    ["Profile", previous.profile.numbers, current.profile.numbers],
+    ["Definition", previous.definition, current.definition],
+  ];
+
+  summaryFields.forEach(([label, from, to]) => {
+    if (from !== to) changes.push({ label, from, to });
+  });
+
+  [
+    ["Personality", previous.gates.personality, current.gates.personality],
+    ["Design", previous.gates.design, current.gates.design],
+  ].forEach(([side, previousGates, currentGates]) => {
+    PLANETS.forEach(([key, label]) => {
+      const from = activationLabel(previousGates[key]);
+      const to = activationLabel(currentGates[key]);
+      if (from !== to) changes.push({ label: `${side} ${label}`, from, to });
+    });
+  });
+
+  const previousChannels = previous.channels.map((channel) => channel.gates.join("–")).sort().join(", ") || "None";
+  const currentChannels = current.channels.map((channel) => channel.gates.join("–")).sort().join(", ") || "None";
+  if (previousChannels !== currentChannels) {
+    changes.push({ label: "Channels", from: previousChannels, to: currentChannels });
+  }
+
+  return changes;
+}
+
+function activationLabel(activation) {
+  return activation ? `${activation.gate}.${activation.line}` : "—";
+}
+
+function localMomentToMs(date, time) {
+  return Date.parse(`${date}T${time}:00Z`);
+}
+
+function msToLocalMoment(milliseconds) {
+  const value = new Date(milliseconds).toISOString();
+  return { date: value.slice(0, 10), time: value.slice(11, 16) };
+}
+
+function addLocalMinutes(date, time, minutes) {
+  return msToLocalMoment(localMomentToMs(date, time) + minutes * 60 * 1000);
+}
+
+function formatMoment(date, time) {
+  return new Intl.DateTimeFormat("en", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+  }).format(new Date(localMomentToMs(date, time)));
+}
+
+function shortMoment(date, time) {
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+  }).format(new Date(localMomentToMs(date, time)));
+}
+
+function showRangeError(message) {
+  const rangeError = document.querySelector("#range-error");
+  rangeError.textContent = message;
+  rangeError.classList.remove("hidden");
+}
+
+function nextFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame(resolve));
 }
 
 function activationColumn(title, gates, side) {
@@ -527,6 +918,20 @@ function stat(label, value) {
       <p class="mt-1 text-sm font-bold leading-5 text-ink">${escapeHTML(value || "—")}</p>
     </div>
   `;
+}
+
+function normalizeTerminology(chart) {
+  if (chart.type?.name !== "Manifesting Generator") return chart;
+
+  return {
+    ...chart,
+    type: {
+      ...chart.type,
+      strategy: "Wait to Respond",
+      notSelf: "Frustration",
+      description: "A Generator subtype with manifesting potential and a faster tempo",
+    },
+  };
 }
 
 function timeToDecimal(time) {

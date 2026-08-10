@@ -1,0 +1,189 @@
+diff --git a/src/calculators/humandesign.js b/src/calculators/humandesign.js
+index adcc57f69556ee3f8d666dd9864dee8f89252f79..15512128d74a0dfec3d1f3fbcd5e4340c0e004ff 100644
+--- a/src/calculators/humandesign.js
++++ b/src/calculators/humandesign.js
+@@ -414,113 +414,89 @@ export function calculateHumanDesign(birthDate, birthHour = 12, timezone = 0, op
+   const personalitySunLong = personalityPos.sun.longitude;
+   const designSunTarget = (personalitySunLong - 88 + 360) % 360;
+ 
+-  // Start with rough estimate: ~88-90 days before birth, same hour
+-  let designDate = new Date(year, month - 1, day - 89);
+-  let designYear = designDate.getFullYear();
+-  let designMonth = designDate.getMonth() + 1;
+-  let designDay = designDate.getDate();
+-  let designHour = birthHour; // Will be refined to find exact moment
+-
+-  // Phase 1: Find the approximate day (within 1 day accuracy)
+-  let designPos = null;
+-  for (let iteration = 0; iteration < 20; iteration++) {
+-    designPos = calculateBirthPositions(designYear, designMonth, designDay, 12, timezone, null, null, options);
+-    const currentSunLong = designPos.sun.longitude;
+-
+-    let diff = currentSunLong - designSunTarget;
+-    if (diff > 180) diff -= 360;
+-    if (diff < -180) diff += 360;
+-
+-    // Within ~1 day (Sun moves ~1° per day)
+-    if (Math.abs(diff) < 1.0) {
+-      break;
+-    }
++  // Search a broad, guaranteed window at minute resolution. Date is used as a
++  // timezone-neutral calendar container here; calculateBirthPositions applies
++  // the requested birth-place timezone when calculating each position.
++  const birthMinute = Date.UTC(year, month - 1, day, 0, Math.round(birthHour * 60)) / 60000;
++  const searchStartMinute = birthMinute - 95 * 24 * 60;
++  const searchEndMinute = birthMinute - 83 * 24 * 60;
++  let lowMinute = searchStartMinute;
++  let highMinute = searchEndMinute;
++  let bestDesign = null;
++
++  const signedArcDifference = (longitude, target) => {
++    let difference = longitude - target;
++    if (difference > 180) difference -= 360;
++    if (difference < -180) difference += 360;
++    return difference;
++  };
+ 
+-    // Adjust date based on how far off we are
+-    const daysToAdjust = -Math.round(diff / 0.9856);
+-    if (daysToAdjust === 0) {
+-      if (diff > 0) designDay -= 1;
+-      else designDay += 1;
+-    } else {
+-      designDay += daysToAdjust;
++  const calculateAtLocalMinute = (minute) => {
++    const localDate = new Date(minute * 60000);
++    const candidateYear = localDate.getUTCFullYear();
++    const candidateMonth = localDate.getUTCMonth() + 1;
++    const candidateDay = localDate.getUTCDate();
++    const candidateHour = localDate.getUTCHours() + localDate.getUTCMinutes() / 60;
++    const positions = calculateBirthPositions(
++      candidateYear,
++      candidateMonth,
++      candidateDay,
++      candidateHour,
++      timezone,
++      null,
++      null,
++      options
++    );
++    const error = signedArcDifference(positions.sun.longitude, designSunTarget);
++    const candidate = {
++      minute,
++      year: candidateYear,
++      month: candidateMonth,
++      day: candidateDay,
++      hour: candidateHour,
++      positions,
++      error
++    };
++
++    if (!bestDesign || Math.abs(error) < Math.abs(bestDesign.error)) {
++      bestDesign = candidate;
+     }
+ 
+-    // Normalize the date
+-    designDate = new Date(designYear, designMonth - 1, designDay);
+-    designYear = designDate.getFullYear();
+-    designMonth = designDate.getMonth() + 1;
+-    designDay = designDate.getDate();
++    return candidate;
++  };
++
++  const startCandidate = calculateAtLocalMinute(searchStartMinute);
++  const endCandidate = calculateAtLocalMinute(searchEndMinute);
++  if (startCandidate.error > 0 || endCandidate.error < 0) {
++    throw new Error('Unable to bracket the Human Design solar-arc moment');
+   }
+ 
+-  // Phase 2: Find the exact hour and minute using binary search
+-  // Search across a 48-hour window centered on our best day estimate
+-  // IMPORTANT: Keep base date fixed, only adjust via offsets
+-  const baseYear = designYear;
+-  const baseMonth = designMonth;
+-  const baseDay = designDay;
+-
+-  let lowDayOffset = -1.0; // 1 day before our estimate
+-  let highDayOffset = 1.0; // 1 day after our estimate
+-  let bestOffset = 0;
+-
+-  for (let iteration = 0; iteration < 30; iteration++) {
+-    const midDayOffset = (lowDayOffset + highDayOffset) / 2;
+-
+-    // Calculate date/time from day offset relative to FIXED base date
+-    // Convert offset to hours from noon on base date
+-    const totalHoursFromBaseNoon = midDayOffset * 24;
+-
+-    // Calculate actual date/time
+-    let searchDate = new Date(baseYear, baseMonth - 1, baseDay, 12);
+-    searchDate.setTime(searchDate.getTime() + totalHoursFromBaseNoon * 60 * 60 * 1000);
+-
+-    const searchYear = searchDate.getFullYear();
+-    const searchMonth = searchDate.getMonth() + 1;
+-    const searchDay = searchDate.getDate();
+-    const searchHour = searchDate.getHours() + searchDate.getMinutes() / 60;
+-
+-    designPos = calculateBirthPositions(searchYear, searchMonth, searchDay, searchHour, timezone, null, null, options);
+-    const currentSunLong = designPos.sun.longitude;
+-
+-    let diff = currentSunLong - designSunTarget;
+-    if (diff > 180) diff -= 360;
+-    if (diff < -180) diff += 360;
+-
+-    // Within 0.001° accuracy (about 1.4 minutes of time)
+-    if (Math.abs(diff) < 0.001) {
+-      designYear = searchYear;
+-      designMonth = searchMonth;
+-      designDay = searchDay;
+-      designHour = searchHour;
+-      break;
+-    }
++  while (lowMinute <= highMinute) {
++    const midMinute = Math.floor((lowMinute + highMinute) / 2);
++    const candidate = calculateAtLocalMinute(midMinute);
+ 
+-    // Binary search: adjust search range
+-    // If diff > 0, Sun is ahead of target, need to go back in time (lower offset)
+-    // If diff < 0, Sun is behind target, need to go forward in time (higher offset)
+-    if (diff > 0) {
+-      highDayOffset = midDayOffset;
++    if (candidate.error < 0) {
++      lowMinute = midMinute + 1;
+     } else {
+-      lowDayOffset = midDayOffset;
++      highMinute = midMinute - 1;
+     }
+-
+-    // Track best offset for final result if we don't converge
+-    bestOffset = midDayOffset;
+   }
+ 
+-  // If loop completed without break, use best offset to set final values
+-  if (designYear === baseYear && designMonth === baseMonth && designDay === baseDay) {
+-    const totalHoursFromBaseNoon = bestOffset * 24;
+-    let finalDate = new Date(baseYear, baseMonth - 1, baseDay, 12);
+-    finalDate.setTime(finalDate.getTime() + totalHoursFromBaseNoon * 60 * 60 * 1000);
+-    designYear = finalDate.getFullYear();
+-    designMonth = finalDate.getMonth() + 1;
+-    designDay = finalDate.getDate();
+-    designHour = finalDate.getHours() + finalDate.getMinutes() / 60;
++  // Check both sides of the crossing and their immediate neighbors so the
++  // selected minute has the smallest possible solar-arc error.
++  for (
++    let minute = Math.max(searchStartMinute, lowMinute - 2);
++    minute <= Math.min(searchEndMinute, lowMinute + 2);
++    minute++
++  ) {
++    calculateAtLocalMinute(minute);
+   }
+ 
+-  // Final calculation at the exact Design moment
+-  designPos = calculateBirthPositions(designYear, designMonth, designDay, designHour, timezone, null, null, options);
++  const designYear = bestDesign.year;
++  const designMonth = bestDesign.month;
++  const designDay = bestDesign.day;
++  const designHour = bestDesign.hour;
++  const designPos = bestDesign.positions;
+ 
+   // Build gate activations for all planets
+   const personalityGates = {
