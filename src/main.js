@@ -7,6 +7,7 @@ import {
   resolveUtcOffset,
   searchPlaces,
 } from "natalengine";
+import { calculateChineseMetaphysics } from "./chinese-metaphysics.js";
 import { getHexagram } from "./hexagrams.js";
 
 const PLANETS = [
@@ -33,7 +34,7 @@ app.innerHTML = `
       <span class="grid size-10 place-items-center rounded-full border border-ink/15 bg-white/45 font-serif text-2xl">☰</span>
       <span>
         <span class="block font-serif text-xl font-semibold leading-none">Inner Compass</span>
-        <span class="eyebrow mt-1 block text-[0.52rem] font-bold text-ink/45">Human Design · 易經</span>
+        <span class="eyebrow mt-1 block text-[0.52rem] font-bold text-ink/45">Human Design · 易經 · 八字</span>
       </span>
     </a>
     <a href="#method" class="hidden text-sm font-semibold text-ink/55 underline decoration-ink/20 underline-offset-4 transition hover:text-ink sm:block">How it works</a>
@@ -47,7 +48,7 @@ app.innerHTML = `
           Meet the design beneath the noise.
         </h1>
         <p class="mt-6 max-w-xl text-base leading-7 text-ink/62 sm:text-lg">
-          Enter your birth details to map your BodyGraph, active gates, channels, and their 64 I Ching hexagrams.
+          Enter your birth details to map your BodyGraph, active gates, 64 I Ching hexagrams, 本命卦, and 八字.
         </p>
 
         <form id="chart-form" class="panel mt-9 rounded-[1.65rem] p-5 sm:p-6" novalidate>
@@ -61,6 +62,16 @@ app.innerHTML = `
               <input id="birth-time" name="birthTime" class="field-input" type="time" step="60" required />
             </label>
           </div>
+
+          <label class="mt-4 block" for="birth-sex">
+            <span class="field-label">Traditional sex category</span>
+            <select id="birth-sex" name="birthSex" class="field-input appearance-none" required>
+              <option value="">Choose for 本命卦…</option>
+              <option value="male">Male · 男命</option>
+              <option value="female">Female · 女命</option>
+            </select>
+            <span class="mt-2 block text-xs leading-5 text-ink/45">Required only because the traditional 八宅命卦 formula differs for male and female births.</span>
+          </label>
 
           <div class="relative mt-4">
             <label for="birth-location" class="field-label">Birth location</label>
@@ -135,7 +146,7 @@ app.innerHTML = `
         <p class="eyebrow text-xs font-bold text-sage">Calculation method</p>
         <h2 class="mt-3 font-serif text-4xl font-semibold">What powers the chart?</h2>
       </div>
-      <div class="grid gap-5 sm:grid-cols-3">
+      <div class="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
         <div class="stat-card">
           <span class="font-serif text-2xl text-clay">01</span>
           <h3 class="mt-3 font-bold">Place → time zone</h3>
@@ -151,18 +162,24 @@ app.innerHTML = `
           <h3 class="mt-3 font-bold">Gates → BodyGraph</h3>
           <p class="mt-2 text-sm leading-6 text-ink/55">Active gate pairs define channels and centers, then render as a responsive SVG.</p>
         </div>
+        <div class="stat-card">
+          <span class="font-serif text-2xl text-clay">04</span>
+          <h3 class="mt-3 font-bold">Civil time → 八字</h3>
+          <p class="mt-2 text-sm leading-6 text-ink/55">Solar-term boundaries set the Four Pillars; the birth year and traditional sex category determine 本命卦.</p>
+        </div>
       </div>
     </section>
   </main>
 
   <footer class="border-t border-ink/10 px-5 py-7 text-center text-xs leading-5 text-ink/42 sm:px-8">
-    A contemplative tool, not scientific or medical guidance · Engine: natalengine 1.6
+    A contemplative tool, not scientific or medical guidance · Engines: NatalEngine · lunar-javascript
   </footer>
 `;
 
 const form = document.querySelector("#chart-form");
 const dateInput = document.querySelector("#birth-date");
 const timeInput = document.querySelector("#birth-time");
+const sexInput = document.querySelector("#birth-sex");
 const locationInput = document.querySelector("#birth-location");
 const offsetInput = document.querySelector("#utc-offset");
 const locationResults = document.querySelector("#location-results");
@@ -308,11 +325,12 @@ function calculateChart() {
 
   const date = dateInput.value;
   const time = timeInput.value;
+  const sex = sexInput.value;
   const locationLabel = locationInput.value.trim();
   const hasOffsetOverride = offsetInput.value !== "";
 
-  if (!date || !time || !locationLabel) {
-    showError("Enter a birth date, local time, and location.");
+  if (!date || !time || !sex || !locationLabel) {
+    showError("Enter a birth date, local time, traditional sex category, and location.");
     return;
   }
 
@@ -339,11 +357,13 @@ function calculateChart() {
         stopRangePlayback(false);
         activeRange = null;
         const chart = normalizeTerminology(calculateHumanDesign(date, decimalHour, utcOffset));
+        const chinese = calculateChineseMetaphysics(date, time, sex, utcOffset);
         renderChart(chart, {
           location: selectedPlace?.label || locationLabel,
           timezone: selectedPlace?.timezone || "Manual offset",
           utcOffset,
           localTime: time,
+          chinese,
         });
       } catch (error) {
         console.error(error);
@@ -454,6 +474,8 @@ function renderChart(chart, context, options = {}) {
           </div>
         </aside>
       </div>
+
+      ${chineseMetaphysicsPanel(context.chinese)}
 
       <section class="border-t border-ink/10 bg-white/22 px-5 py-8 sm:px-9 sm:py-10">
         <div class="flex flex-wrap items-end justify-between gap-3">
@@ -670,6 +692,12 @@ async function calculateRange() {
     return;
   }
 
+  const sex = sexInput.value;
+  if (!sex) {
+    showRangeError("Choose the traditional sex category for the 本命卦 calculation.");
+    return;
+  }
+
   rangeButton.disabled = true;
   const snapshots = [];
 
@@ -680,18 +708,20 @@ async function calculateRange() {
         ? Number(offsetInput.value)
         : resolveUtcOffset(date, time, selectedPlace.timezone);
       const chart = normalizeTerminology(calculateHumanDesign(date, timeToDecimal(time), utcOffset));
-      const previous = snapshots.at(-1)?.chart;
+      const chinese = calculateChineseMetaphysics(date, time, sex, utcOffset);
+      const previous = snapshots.at(-1);
 
       snapshots.push({
         chart,
         date,
         time,
-        changes: previous ? compareCharts(previous, chart) : [],
+        changes: previous ? compareCharts(previous.chart, chart, previous.context.chinese, chinese) : [],
         context: {
           location: selectedPlace?.label || locationInput.value.trim(),
           timezone: selectedPlace?.timezone || "Manual offset",
           utcOffset,
           localTime: time,
+          chinese,
         },
       });
 
@@ -786,7 +816,7 @@ function stopRangePlayback(render = true) {
   }
 }
 
-function compareCharts(previous, current) {
+function compareCharts(previous, current, previousChinese, currentChinese) {
   const changes = [];
   const summaryFields = [
     ["Type", previous.type.name, current.type.name],
@@ -814,6 +844,23 @@ function compareCharts(previous, current) {
   const currentChannels = current.channels.map((channel) => channel.gates.join("–")).sort().join(", ") || "None";
   if (previousChannels !== currentChannels) {
     changes.push({ label: "Channels", from: previousChannels, to: currentChannels });
+  }
+
+  if (previousChinese && currentChinese) {
+    previousChinese.bazi.pillars.forEach((pillar, index) => {
+      const currentPillar = currentChinese.bazi.pillars[index];
+      if (pillar.value !== currentPillar.value) {
+        changes.push({ label: `八字 ${pillar.label}`, from: pillar.value, to: currentPillar.value });
+      }
+    });
+
+    if (previousChinese.mingGua.number !== currentChinese.mingGua.number) {
+      changes.push({
+        label: "本命卦",
+        from: `${previousChinese.mingGua.number} · ${previousChinese.mingGua.name}`,
+        to: `${currentChinese.mingGua.number} · ${currentChinese.mingGua.name}`,
+      });
+    }
   }
 
   return changes;
@@ -865,6 +912,94 @@ function showRangeError(message) {
 
 function nextFrame() {
   return new Promise((resolve) => window.requestAnimationFrame(resolve));
+}
+
+function chineseMetaphysicsPanel(chinese) {
+  if (!chinese) return "";
+
+  const { bazi, mingGua, solarTerms } = chinese;
+
+  return `
+    <section class="border-t border-ink/10 bg-sage/[0.045] px-5 py-8 sm:px-9 sm:py-10">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p class="eyebrow text-[0.62rem] font-bold text-sage">中華命理 · Chinese metaphysics</p>
+          <h3 class="mt-2 font-serif text-3xl font-semibold">八字與本命卦</h3>
+        </div>
+        <p class="max-w-md text-xs leading-5 text-ink/45">Calculated locally from the entered civil birth time. Solar-term boundaries are converted to the birthplace UTC offset.</p>
+      </div>
+
+      <div class="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(15rem,0.55fr)]">
+        <article class="rounded-2xl border border-ink/10 bg-[#fffdf8]/72 p-4 sm:p-5">
+          <div class="flex flex-wrap items-start justify-between gap-4 border-b border-ink/10 pb-4">
+            <div>
+              <p class="eyebrow text-[0.56rem] font-bold text-clay">四柱八字 · Four Pillars</p>
+              <p class="mt-2 font-serif text-2xl font-semibold tracking-[0.16em] sm:text-3xl">${escapeHTML(bazi.value)}</p>
+            </div>
+            <div class="rounded-xl bg-sage/9 px-3 py-2 text-right text-xs leading-5 text-ink/50">
+              <span class="block font-bold text-ink">日主 ${escapeHTML(bazi.dayMaster.stem)} · ${escapeHTML(bazi.dayMaster.polarity)}${escapeHTML(bazi.dayMaster.element)}</span>
+              ${escapeHTML(bazi.lunarDate)} · ${escapeHTML(bazi.zodiac)}
+            </div>
+          </div>
+
+          <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            ${bazi.pillars.map(pillarCard).join("")}
+          </div>
+
+          <p class="mt-4 text-[0.68rem] leading-5 text-ink/42">Convention: civil clock time, exact 節氣 year/month boundaries, and the civil-midnight day boundary (sect ${bazi.sect}). True solar time is not applied.</p>
+        </article>
+
+        <article class="flex flex-col rounded-2xl border border-ink/10 bg-ink p-5 text-paper">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="eyebrow text-[0.56rem] font-bold text-paper/50">八宅本命卦 · Ming Gua</p>
+              <h4 class="mt-3 font-serif text-4xl font-semibold">${mingGua.number} · ${escapeHTML(mingGua.name)}<span class="ml-2 text-xl text-paper/45">${escapeHTML(mingGua.english)}</span></h4>
+            </div>
+            <span class="hex-symbol text-6xl text-gold" aria-hidden="true">${mingGua.symbol}</span>
+          </div>
+
+          <div class="mt-6 grid grid-cols-2 gap-4">
+            ${darkStat("類別", mingGua.group)}
+            ${darkStat("五行", mingGua.element)}
+            ${darkStat("本位", mingGua.direction)}
+            ${darkStat("命年", `${mingGua.year} · ${mingGua.sexLabel}`)}
+          </div>
+
+          <div class="mt-auto border-t border-paper/12 pt-5 text-xs leading-5 text-paper/50">
+            The traditional formula uses the solar year at 立春. For this date, the local boundary is ${escapeHTML(solarTerms.liChunLocal)}.
+          </div>
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function pillarCard(pillar) {
+  const hidden = pillar.hiddenStems
+    .map((stem, index) => `${stem} · ${pillar.hiddenTenGods[index]}`)
+    .join(" / ");
+
+  return `
+    <div class="rounded-xl border border-ink/8 bg-white/60 p-3 text-center">
+      <p class="text-[0.62rem] font-bold uppercase tracking-wider text-ink/42">${escapeHTML(pillar.label)} · ${escapeHTML(pillar.english)}</p>
+      <p class="mt-3 font-serif text-4xl font-semibold leading-none">${escapeHTML(pillar.gan)}<span class="text-clay">${escapeHTML(pillar.zhi)}</span></p>
+      <p class="mt-2 text-xs font-bold text-sage">${escapeHTML(pillar.ganElement)} / ${escapeHTML(pillar.zhiElement)} · ${escapeHTML(pillar.tenGod)}</p>
+      <dl class="mt-3 border-t border-ink/8 pt-3 text-left text-[0.65rem] leading-5 text-ink/48">
+        <div><dt class="inline font-bold text-ink/65">藏干</dt><dd class="ml-1 inline">${escapeHTML(hidden)}</dd></div>
+        <div><dt class="inline font-bold text-ink/65">納音</dt><dd class="ml-1 inline">${escapeHTML(pillar.naYin)}</dd></div>
+        <div><dt class="inline font-bold text-ink/65">空亡</dt><dd class="ml-1 inline">${escapeHTML(pillar.xunKong)}</dd></div>
+      </dl>
+    </div>
+  `;
+}
+
+function darkStat(label, value) {
+  return `
+    <div class="border-t border-paper/15 pt-3">
+      <p class="text-[0.58rem] font-bold uppercase tracking-wider text-paper/40">${escapeHTML(label)}</p>
+      <p class="mt-1 text-sm font-bold text-paper">${escapeHTML(value)}</p>
+    </div>
+  `;
 }
 
 function activationColumn(title, gates, side) {
